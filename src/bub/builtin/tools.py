@@ -320,6 +320,15 @@ async def quit_tool(*, context: ToolContext) -> str:
     return "Session tasks stopped."
 
 
+@tool(name="turn.cancel", context=True)
+async def turn_cancel(*, context: ToolContext) -> str:
+    """Cancel the active channel turn for the current session."""
+    agent = _get_agent(context)
+    session_id = context.state.get("session_id", "temp/unknown")
+    agent.framework.request_turn_cancel(session_id)
+    return "Turn cancellation requested."
+
+
 def _resolve_path(context: ToolContext, raw_path: str) -> Path:
     workspace = context.state.get("_runtime_workspace")
     path = Path(raw_path).expanduser()

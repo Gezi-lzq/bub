@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from republic import AsyncStreamEvents, StreamEvent
+from republic import AsyncStreamEvents, StreamEvent, ToolContext
 
 from bub.builtin.hook_impl import AGENTS_FILE_NAME, DEFAULT_SYSTEM_PROMPT, BuiltinImpl
 from bub.builtin.store import FileTapeStore
@@ -240,6 +240,25 @@ async def test_dispatch_outbound_uses_framework_router(tmp_path: Path) -> None:
 
     assert result is True
     assert dispatched == [outbound]
+
+
+@pytest.mark.asyncio
+async def test_turn_cancel_tool_requests_framework_cancel_signal() -> None:
+    import bub.builtin.tools as builtin_tools
+
+    cancelled: list[str] = []
+
+    class FakeFramework:
+        def request_turn_cancel(self, session_id: str) -> None:
+            cancelled.append(session_id)
+
+    agent = SimpleNamespace(framework=FakeFramework())
+    context = ToolContext(tape="tape", run_id="run", state={"_runtime_agent": agent, "session_id": "session"})
+
+    result = await builtin_tools.turn_cancel.handler(context=context)
+
+    assert result == "Turn cancellation requested."
+    assert cancelled == ["session"]
 
 
 def test_render_outbound_preserves_message_metadata(tmp_path: Path) -> None:

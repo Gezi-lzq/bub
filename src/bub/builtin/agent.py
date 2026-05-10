@@ -32,13 +32,16 @@ from republic.tape import InMemoryTapeStore, Tape
 from bub.builtin.settings import AgentSettings, load_settings
 from bub.builtin.store import ForkTapeStore
 from bub.builtin.tape import TapeService
+from bub.envelope import content_of
 from bub.framework import BubFramework
 from bub.skills import discover_skills, render_skills_prompt
 from bub.tools import REGISTRY, model_tools, render_tools_prompt
+from bub.turn_admission import TurnCancelled
 from bub.types import State
 from bub.utils import workspace_from_state
 
 CONTINUE_PROMPT = "Continue the task."
+STEERING_PROMPT_PREFIX = "New steering messages received for this running turn:"
 HINT_RE = re.compile(r"\$([A-Za-z0-9_.-]+)")
 _CONTEXT_LENGTH_PATTERNS = re.compile(
     r"context.{0,20}(?:length|window)|maximum.{0,20}context|token.{0,10}limit|prompt.{0,10}too long|tokens? > \d+ maximum",
@@ -267,6 +270,8 @@ class Agent:
         display_model = model or self.settings.model
         next_prompt = prompt
         for step in range(1, self.settings.max_steps + 1):
+            next_prompt = self._prompt_with_injected_messages(tape.context.state, next_prompt)
+            self._raise_if_turn_cancelled(tape.context.state)
             start = time.monotonic()
             logger.info("loop.step step={} tape={} model={}", step, tape.name, display_model)
             await self.tapes.append_event(tape.name, "loop.step.start", {"step": step, "prompt": next_prompt})
@@ -278,6 +283,19 @@ class Agent:
                     allowed_skills=allowed_skills,
                     allowed_tools=allowed_tools,
                 )
+            except TurnCancelled:
+                elapsed_ms = int((time.monotonic() - start) * 1000)
+                await self.tapes.append_event(
+                    tape.name,
+                    "loop.step",
+                    {
+                        "step": step,
+                        "elapsed_ms": elapsed_ms,
+                        "status": "cancelled",
+                        "date": datetime.now(UTC).isoformat(),
+                    },
+                )
+                raise
             except Exception as exc:
                 elapsed_ms = int((time.monotonic() - start) * 1000)
                 await self.tapes.append_event(
@@ -380,6 +398,8 @@ class Agent:
         display_model = model or self.settings.model
         next_prompt = prompt
         for step in range(1, self.settings.max_steps + 1):
+            next_prompt = self._prompt_with_injected_messages(tape.context.state, next_prompt)
+            self._raise_if_turn_cancelled(tape.context.state)
             start = time.monotonic()
             outcome = _ToolAutoOutcome(kind="text", text="", error="")
             logger.info("loop.step step={} tape={} model={}", step, tape.name, display_model)
@@ -493,6 +513,33 @@ class Agent:
         }
         expanded_skills = set(HINT_RE.findall(prompt)) & set(skill_index.keys())
         return render_skills_prompt(list(skill_index.values()), expanded_skills=expanded_skills)
+
+    @staticmethod
+    def _turn_cancelled(state: State) -> bool:
+        control = state.get("_runtime_turn_control")
+        return bool(getattr(control, "is_cancelled", False))
+
+    @staticmethod
+    def _raise_if_turn_cancelled(state: State) -> None:
+        if Agent._turn_cancelled(state):
+            raise TurnCancelled("turn cancelled")
+
+    @staticmethod
+    def _prompt_with_injected_messages(state: State, prompt: str | list[dict]) -> str | list[dict]:
+        control = state.get("_runtime_turn_control")
+        drain = getattr(control, "drain_injected", None)
+        if not callable(drain):
+            return prompt
+        messages = drain()
+        if not messages:
+            return prompt
+        injected = "\n".join(content_of(message) for message in messages).strip()
+        if not injected:
+            return prompt
+        block = f"{STEERING_PROMPT_PREFIX}\n{injected}"
+        if isinstance(prompt, str):
+            return f"{prompt}\n\n{block}" if prompt else block
+        return [*prompt, {"type": "text", "text": block}]
 
     @overload
     async def _run_once(

@@ -20,6 +20,7 @@ from bub.channels.telegram import TelegramSettings
 from bub.configure import ensure_config
 from bub.framework import BubFramework
 from bub.hookspecs import hookimpl
+from bub.turn_admission import AdmitAction, AdmitDecision, DrainMode
 
 
 def make_named_channel(name: str, label: str) -> Channel:
@@ -352,3 +353,138 @@ async def test_process_inbound_streams_when_requested() -> None:  # noqa: C901
     assert stream_calls == ["prompt"]
     assert wrapped_events == ["text", "text", "final"]
     assert result.model_output == "streamed"
+
+
+@pytest.mark.asyncio
+async def test_process_inbound_exposes_runtime_steering_handle() -> None:
+    framework = BubFramework()
+    observed_state: dict[str, Any] = {}
+
+    class Plugin:
+        @hookimpl
+        def resolve_session(self, message) -> str:
+            return "session"
+
+        @hookimpl
+        def build_prompt(self, message, session_id, state) -> str:
+            return "prompt"
+
+        @hookimpl
+        async def run_model(self, prompt, session_id, state) -> str:
+            observed_state.update(state)
+            return "ok"
+
+    framework._plugin_manager.register(Plugin(), name="plugin")
+
+    await framework.process_inbound(ChannelMessage(session_id="session", channel="cli", chat_id="room", content="hi"))
+
+    assert "_runtime_steering" in observed_state
+    steering = observed_state["_runtime_steering"]
+    assert steering.has_messages() is False
+    assert steering.count == 0
+
+
+@pytest.mark.asyncio
+async def test_process_inbound_clears_unmanaged_turn_control() -> None:
+    framework = BubFramework()
+
+    class Plugin:
+        @hookimpl
+        def resolve_session(self, message) -> str:
+            return "session"
+
+        @hookimpl
+        async def run_model(self, prompt, session_id, state) -> str:
+            return "ok"
+
+    framework._plugin_manager.register(Plugin(), name="plugin")
+
+    await framework.process_inbound(ChannelMessage(session_id="session", channel="cli", chat_id="room", content="hi"))
+
+    assert "session" not in framework._turn_controls
+
+
+@pytest.mark.asyncio
+async def test_framework_admit_message_calls_hook_with_snapshot() -> None:
+    framework = BubFramework()
+    observed: list[tuple[str, str, object]] = []
+
+    class Plugin:
+        @hookimpl
+        def admit_message(self, message, session_id, turn):
+            observed.append((session_id, message.content, turn))
+            return AdmitDecision(AdmitAction.WAIT, reason="serial")
+
+    framework._plugin_manager.register(Plugin(), name="plugin")
+
+    decision = await framework.admit_message(
+        session_id="session",
+        message=ChannelMessage(session_id="session", channel="cli", chat_id="room", content="hi"),
+        turn=SimpleNamespace(is_running=True),
+    )
+
+    assert decision == AdmitDecision(AdmitAction.WAIT, reason="serial")
+    assert observed[0][0] == "session"
+    assert observed[0][1] == "hi"
+    assert observed[0][2].is_running is True
+
+
+@pytest.mark.asyncio
+async def test_drain_steering_messages_supports_modes() -> None:
+    framework = BubFramework()
+    framework.inject_turn_message(
+        "session", ChannelMessage(session_id="session", channel="cli", chat_id="room", content="one")
+    )
+    framework.inject_turn_message(
+        "session", ChannelMessage(session_id="session", channel="cli", chat_id="room", content="two")
+    )
+
+    one = await framework.drain_steering_messages("session", mode=DrainMode.ONE)
+    rest = await framework.drain_steering_messages("session")
+
+    assert [message.content for message in one] == ["one"]
+    assert [message.content for message in rest] == ["two"]
+
+
+def test_turn_cancel_signal_is_scoped_to_session() -> None:
+    framework = BubFramework()
+
+    framework.request_turn_cancel("session-a")
+
+    assert framework.turn_control("session-a").is_cancelled is True
+    assert framework.turn_control("session-b").is_cancelled is False
+
+
+@pytest.mark.asyncio
+async def test_process_inbound_preserves_resolve_session_error(load_config) -> None:
+    framework = BubFramework()
+
+    class Plugin:
+        @hookimpl
+        def resolve_session(self, message) -> str:
+            raise RuntimeError("bad session")
+
+    framework._plugin_manager.register(Plugin(), name="plugin")
+
+    with pytest.raises(RuntimeError, match="bad session"):
+        await framework.process_inbound(ChannelMessage(session_id="raw", channel="cli", chat_id="room", content="hi"))
+
+
+@pytest.mark.asyncio
+async def test_resolve_session_prefers_runtime_session_id(load_config) -> None:
+    framework = BubFramework()
+
+    class Plugin:
+        @hookimpl
+        def resolve_session(self, message) -> str:
+            return "hook-session"
+
+    framework._plugin_manager.register(Plugin(), name="plugin")
+
+    session_id = await framework.resolve_session({
+        "session_id": "raw",
+        "_runtime_session_id": "runtime-session",
+        "content": "hi",
+    })
+
+    assert session_id == "runtime-session"
