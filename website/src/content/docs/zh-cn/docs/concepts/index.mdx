@@ -22,19 +22,23 @@ sidebar:
 
 下面这张图会在 [Turn pipeline](/zh-cn/docs/concepts/turn-pipeline/) 中详细展开：
 
-```diagram
-inbound envelope
-         │
-         ▼
-╭─────────────────╮      ╭───────────────╮      ╭───────────────╮      ╭───────────────╮
-│ resolve_session │────▶│   load_state  │────▶│  build_prompt │────▶│   run_model   │
-│                 │      │               │      │               │      │   [_stream]   │
-╰─────────────────╯      ╰───────────────╯      ╰───────────────╯      ╰───────┬───────╯
-                                                                               │
-      ╭───────────────────╮    ╭─────────────────╮    ╭───────────────╮        │
-      │ dispatch_outbound │◀──│ render_outbound │◀──│   save_state  │◀──────╯
-      │                   │    │                 │    │   (finally)   │
-      ╰───────────────────╯    ╰─────────────────╯    ╰───────────────╯
+```mermaid
+flowchart TB
+  subgraph row1[" "]
+    direction LR
+    inbound(["inbound envelope"]) --> resolve["resolve_session"]
+    resolve --> load["load_state"]
+    load --> prompt["build_prompt"]
+    prompt --> model["run_model<br/>[_stream]"]
+  end
+  subgraph row2[" "]
+    direction RL
+    save["save_state<br/>(finally)"] --> render["render_outbound"]
+    render --> dispatch["dispatch_outbound"]
+  end
+  model --> save
+  style row1 fill:transparent,stroke:transparent
+  style row2 fill:transparent,stroke:transparent
 ```
 
 `save_state` 始终在 `finally` 块中执行；`render_outbound` 与 `dispatch_outbound` 仅在 turn 成功时执行。
