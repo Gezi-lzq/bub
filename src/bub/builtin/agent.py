@@ -40,7 +40,7 @@ from bub.turn_admission import TurnCancelled
 from bub.types import State
 from bub.utils import workspace_from_state
 
-CONTINUE_PROMPT = "Continue the task."
+CONTINUE_PROMPT = "Continue the task until all targets are completed."
 STEERING_PROMPT_PREFIX = "New steering messages received for this running turn:"
 HINT_RE = re.compile(r"\$([A-Za-z0-9_.-]+)")
 _CONTEXT_LENGTH_PATTERNS = re.compile(

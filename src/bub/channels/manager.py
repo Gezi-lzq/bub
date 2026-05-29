@@ -9,7 +9,7 @@ from pydantic_settings import SettingsConfigDict
 from republic import StreamEvent
 
 from bub import config
-from bub.channels.base import Channel
+from bub.channels.base import Channel, Interface, Lifecycle
 from bub.channels.handler import BufferedMessageHandler
 from bub.channels.message import ChannelMessage
 from bub.configure import Settings, ensure_config
@@ -122,12 +122,39 @@ class ChannelManager:
         logger.info(f"channel.manager quit session_id={session_id}, cancelled {cancelled} tasks")
 
     def enabled_channels(self) -> list[Channel]:
-        if "all" in self._enabled_channels:
-            # Exclude 'cli' channel from 'all' to prevent interference with other channels
-            return [channel for name, channel in self._channels.items() if name != "cli" and channel.enabled]
-        return [
-            channel for name, channel in self._channels.items() if name in self._enabled_channels and channel.enabled
+        """Channels are enabled by the following rules:
+        - Interfaces are enabled only if explicitly *included*.
+        - Lifecycles are always enabled unless explicitly *excluded*.
+        - Regular channels depend on the values of include and exclude.
+        """
+        included_channels = [
+            name.strip() for name in self._enabled_channels if name.strip() and not name.strip().startswith("!")
         ]
+        excluded_channels = {name.strip()[1:] for name in self._enabled_channels if name.strip().startswith("!")}
+
+        if "all" in included_channels:
+            return [
+                channel
+                for channel in self._channels.values()
+                if channel.name not in excluded_channels and channel.enabled and not isinstance(channel, Interface)
+            ]
+        channels = [
+            channel
+            for name, channel in self._channels.items()
+            if name in included_channels and name not in excluded_channels and channel.enabled
+        ]
+        if not any(not isinstance(channel, Lifecycle) for channel in channels):
+            return channels
+        enabled_names = {channel.name for channel in channels}
+        channels.extend(
+            channel
+            for channel in self._channels.values()
+            if channel.name not in enabled_names
+            and channel.name not in excluded_channels
+            and channel.enabled
+            and isinstance(channel, Lifecycle)
+        )
+        return channels
 
     def _controller(self, session_id: str) -> SessionTurnController:
         controller = self._session_controllers.get(session_id)
