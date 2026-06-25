@@ -40,7 +40,9 @@ from bub.turn_admission import TurnCancelled
 from bub.types import State
 from bub.utils import workspace_from_state
 
-CONTINUE_PROMPT = "Continue the task until all targets are completed."
+CONTINUE_PROMPT = """Continue the task until all targets are completed.
+
+This is an internal continuation prompt, not a new user request. Do not send channel messages merely to acknowledge this continuation. Only call tools/skills if there is a concrete unfinished target from the original request or newly injected steering messages. If all known targets are complete, return a final text response and stop."""
 STEERING_PROMPT_PREFIX = "New steering messages received for this running turn:"
 HINT_RE = re.compile(r"\$([A-Za-z0-9_.-]+)")
 _CONTEXT_LENGTH_PATTERNS = re.compile(
